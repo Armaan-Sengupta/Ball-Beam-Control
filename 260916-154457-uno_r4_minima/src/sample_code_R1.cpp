@@ -26,8 +26,13 @@ void loop() {
 }
 
 float controller(float targetAngle, float currentAngle){
+
+  // saturate target angle
+  if (targetAngle > 0.7) targetAngle = 0.7;
+  if (targetAngle < -0.7) targetAngle = -0.7;
+
   float error = targetAngle - currentAngle; // radians
-  float Kp = 15.0f; // Proportional gain (Volts / radian - tune as needed)
+  float Kp = 35.0f; 
   float controlSignal = Kp * error;
 
   // Saturate control signal to ±6 V
@@ -38,26 +43,24 @@ float controller(float targetAngle, float currentAngle){
 }
 
 // ================== Stiction / Deadband Compensation ==================
-const float STICTION_CW  = 0.17f; // Volts needed to overcome clockwise (+ve) friction
-const float STICTION_CCW = 0.20f; // Volts needed to overcome counterclockwise (-ve) friction
-const float DEADBAND_EPS = 0.005f; // Small deadband to prevent motor chattering around 0V
+const float STICTION_CW  = 0.17f;
+const float STICTION_CCW = 0.20f;
+const float DEADBAND_EPS = 0.0f;
 
-void setMotorVoltageWithStiction(float volts) {
+float setMotorVoltageWithStiction(float volts) {
   float compensatedVoltage = 0.0f;
 
   if (volts > DEADBAND_EPS) {
-    // Clockwise (+ve): boost voltage to overcome CW stiction
     compensatedVoltage = volts + STICTION_CW;
   } else if (volts < -DEADBAND_EPS) {
-    // Counterclockwise (-ve): boost voltage in negative direction to overcome CCW stiction
     compensatedVoltage = volts - STICTION_CCW;
   } else {
-    // At zero: keep voltage at 0 to prevent jitter/chatter
     compensatedVoltage = 0.0f;
   }
 
-  // Pass to geeWhiz driver (which handles direction, PWM duty & ±6V clamping)
-  setMotorVoltage(compensatedVoltage);
+  //invert to make it such that a +ve voltage results in a CCW rotation (+ve by convention)
+  setMotorVoltage(-compensatedVoltage); 
+  return compensatedVoltage;
 }
 // ================== Calibration & Conversions ==================
 const int   ZERO_OFFSET_TICKS   = 5191;               // ticks at 0 deg/rad
@@ -93,8 +96,12 @@ void interval_control_code(void) {
 
   float currentAngle = ticks_to_radians(motor);
   float targetAngle  = targetAngles[currentTargetIndex];
-  setMotorVoltageWithStiction(controller(targetAngle, currentAngle));
-  Serial.println(currentAngle);
+  float voltage = setMotorVoltageWithStiction(controller(targetAngle, currentAngle));
+  Serial.print(currentAngle);
+  Serial.print(",");
+  Serial.print(targetAngle);
+  Serial.print(",");
+  Serial.println(voltage);
 
   digitalWrite(A5,LOW);   // A5 can be used to measure cycle time using an oscilloscope by connecting the scope to the Arduino Box Motor Leads
 
