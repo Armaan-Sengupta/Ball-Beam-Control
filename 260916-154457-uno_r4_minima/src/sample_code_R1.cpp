@@ -13,7 +13,7 @@ void setup() {
   pinMode(A5,
           OUTPUT); // A5 can be used to measure cycle time using an oscilloscope
                    // by connecting the scope to the Arduino Box Motor Leads
-  Serial.begin(115200);
+  Serial.begin(230400);
 
   geeWhizBegin();
   set_control_interval_ms(2); // 10 ms loop
