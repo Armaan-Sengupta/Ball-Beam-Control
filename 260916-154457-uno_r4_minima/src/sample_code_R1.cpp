@@ -1,3 +1,4 @@
+#include "api/Common.h"
 #include "geeWhiz.h"
 #include <Arduino.h>
 
@@ -33,7 +34,7 @@ float controller(float targetAngle, float currentAngle) {
     targetAngle = -0.7;
 
   float error = targetAngle - currentAngle; // radians
-  float Kp = 35.0f;
+  float Kp = 18.0f;
   float controlSignal = Kp * error;
 
   // Saturate control signal to ±6 V
