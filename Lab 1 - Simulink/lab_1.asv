@@ -1,0 +1,12 @@
+clc;
+
+% Found Experimentally (2ms)
+o_s = 0.5; 
+t_p = 5;
+
+% Constants
+kp
+
+zeta = (-log(o_s))/(sqrt((pi^2) + (log(o_s)^2)));
+omega = (pi)/(t_p * (sqrt(1 - (zeta^2))));
+tau = 4/(zeta * omega);
