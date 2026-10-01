@@ -1,7 +1,6 @@
 #include "geeWhiz.h"
 #include <Arduino.h>
 
-
 // ================== Pins ==================
 int MOT_PIN = A0; // motor angle sensor
 int BAL_PIN = A1; // ball position sensor
@@ -16,7 +15,7 @@ void setup() {
   Serial.begin(230400);
 
   geeWhizBegin();
-  set_control_interval_ms(2); // 10 ms loop
+  set_control_interval_ms(2); // 2 ms loop
   setMotorVoltage(0.0f);
 
   Serial.println("geeWhiz Started");
@@ -104,13 +103,16 @@ void interval_control_code(void) {
 
   float currentAngle = ticks_to_radians(motor);
   float targetAngle = targetAngles[currentTargetIndex];
-  float voltage =
-      setMotorVoltageWithStiction(controller(targetAngle, currentAngle));
-  Serial.print(currentAngle);
+  float voltage = setMotorVoltageWithStiction(controller(targetAngle, currentAngle));
+  Serial.print(millis());
+  Serial.print(",");
+  Serial.print(currentAngle, 5);
   Serial.print(",");
   Serial.print(targetAngle);
   Serial.print(",");
-  Serial.println(voltage);
+  Serial.print(voltage);
+  Serial.println();
+  
 
   digitalWrite(
       A5, LOW); // A5 can be used to measure cycle time using an oscilloscope by
