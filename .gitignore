@@ -1,2 +1,3 @@
 260916-154457-uno_r4_minima/logs/*
-260916-154457-uno_r4_minima/__pycache__/*
+**/__pycache__/*
+*.r2024b
