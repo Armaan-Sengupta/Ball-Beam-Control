@@ -43,6 +43,10 @@ float controller(float targetAngle, float currentAngle) {
 
   float controlSignal = (b1_d * error) + (b0_d * last_error) - (a0_d * last_controlSignal);
 
+  if (currentAngle > 0.8 || currentAngle < -0.8) {
+    controlSignal = 0.0f;
+  }
+
   // Saturate control signal to ±6 V
   // if (controlSignal > 6.0f)
   //   controlSignal = 6.0f;
