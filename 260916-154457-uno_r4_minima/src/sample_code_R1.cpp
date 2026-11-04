@@ -62,6 +62,14 @@ float setMotorVoltageWithStiction(float volts) {
     compensatedVoltage = 0.0f;
   }
 
+  // setMotorVoltage() already saturates the pins at ±6 V. Clamp the value
+  // returned here too, so the number printed on serial is the pin voltage
+  // and not the extra stiction offset past the rail.
+  if (compensatedVoltage > 6.0f)
+    compensatedVoltage = 6.0f;
+  if (compensatedVoltage < -6.0f)
+    compensatedVoltage = -6.0f;
+
   // invert to make it such that a +ve voltage results in a CCW rotation (+ve by
   // convention)
   setMotorVoltage(-compensatedVoltage);
@@ -81,8 +89,8 @@ inline float ticks_to_radians(int ticks) {
 }
 
 #define NUM_TARGETS 2
-float targetAngles[NUM_TARGETS] = {-0.1, 0.1};   // radians
-int targetDurations[NUM_TARGETS] = {1000, 1000}; // milliseconds
+float targetAngles[NUM_TARGETS] = {-0.7, 0.7};   // radians
+int targetDurations[NUM_TARGETS] = {500, 500}; // milliseconds
 
 // ================== Control ISR ==================
 void interval_control_code(void) {

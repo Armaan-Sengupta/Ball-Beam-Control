@@ -1,3 +1,6 @@
 260916-154457-uno_r4_minima/logs/*
 **/__pycache__/*
 *.r2024b
+*.mat
+*.slxc
+**/simulink_cache.xml
