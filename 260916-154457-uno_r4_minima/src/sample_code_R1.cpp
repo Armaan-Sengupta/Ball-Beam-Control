@@ -26,6 +26,8 @@ void setup() {
 void loop() {}
 
 float controller(float targetAngle, float currentAngle) {
+  static float last_error = 0.0f;
+  static float last_controlSignal = 0.0f;
 
   // saturate target angle
   if (targetAngle > 0.7)
@@ -34,14 +36,21 @@ float controller(float targetAngle, float currentAngle) {
     targetAngle = -0.7;
 
   float error = targetAngle - currentAngle; // radians
-  float Kp = 18.0f;
-  float controlSignal = Kp * error;
+  float b1_d = -2.702602561764911;
+  float b0_d = 2.270448497190859;
+  float a1_d = 1.000000000000000;
+  float a0_d = -0.914329121458805;
+
+  float controlSignal = (b1_d * error) + (b0_d * last_error) - (a0_d * last_controlSignal);
 
   // Saturate control signal to ±6 V
-  if (controlSignal > 6.0f)
-    controlSignal = 6.0f;
-  if (controlSignal < -6.0f)
-    controlSignal = -6.0f;
+  // if (controlSignal > 6.0f)
+  //   controlSignal = 6.0f;
+  // if (controlSignal < -6.0f)
+  //   controlSignal = -6.0f;
+
+  last_error = error;
+  last_controlSignal = controlSignal;
 
   return controlSignal;
 }
@@ -65,10 +74,10 @@ float setMotorVoltageWithStiction(float volts) {
   // setMotorVoltage() already saturates the pins at ±6 V. Clamp the value
   // returned here too, so the number printed on serial is the pin voltage
   // and not the extra stiction offset past the rail.
-  if (compensatedVoltage > 6.0f)
-    compensatedVoltage = 6.0f;
-  if (compensatedVoltage < -6.0f)
-    compensatedVoltage = -6.0f;
+  // if (compensatedVoltage > 6.0f)
+  //   compensatedVoltage = 6.0f;
+  // if (compensatedVoltage < -6.0f)
+  //   compensatedVoltage = -6.0f;
 
   // invert to make it such that a +ve voltage results in a CCW rotation (+ve by
   // convention)

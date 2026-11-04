@@ -74,10 +74,10 @@ Pd = c2d(P, T, 'zoh');       % plant driven by a held voltage
 fprintf('=== DISCRETE CONTROLLER D1(z) (Sampling Time T = %.4f s) ===\n', T);
 D1
 for k = 1:numel(numD)
-    fprintf('  num z^%d = %.15f\n', numel(numD) - k, numD(k));
+    fprintf('  b%d_d = %.15f\n', numel(numD) - k, numD(k));
 end
 for k = 1:numel(denD)
-    fprintf('  den z^%d = %.15f\n', numel(denD) - k, denD(k));
+    fprintf('  a%d_d = %.15f\n', numel(denD) - k, denD(k));
 end
 
 theta_CL_TF_d = feedback(D1 * Pd, 1);   % Closed loop: Theta / Theta_ref
