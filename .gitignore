@@ -5,3 +5,4 @@ Lab 2 - Simulink/logs/*
 *.mat
 *.slxc
 **/simulink_cache.xml
+logs/**/*

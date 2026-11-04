@@ -144,12 +144,13 @@ def self_test() -> None:
 
     print("voltage past the rail")
     v_bad = list(v)
-    v_bad[3] = 6.17
-    v_bad[20] = -6.20
+    over = spec.v_limit + 0.5
+    v_bad[3] = over
+    v_bad[20] = -over
     mv = compute_metrics(t, y, v_bad, 0.7, 0.7, -0.7, spec)
     _check("logged over-voltage fails", mv.pass_v is False and len(mv.viol_t) == 2)
-    _check("Vmax marker is the +6.17 sample", abs(mv.v_max - 6.17) < 1e-9 and abs(mv.v_max_t - t[3]) < 1e-12)
-    _check("Vmin marker is the -6.20 sample", abs(mv.v_min + 6.20) < 1e-9)
+    _check("Vmax marker is the over-limit sample", abs(mv.v_max - over) < 1e-9 and abs(mv.v_max_t - t[3]) < 1e-12)
+    _check("Vmin marker is the under-limit sample", abs(mv.v_min + over) < 1e-9)
 
     print("nonzero steady-state error")
     y_off = [_underdamped(ti, -0.7, 0.64, wn, zeta) for ti in t]
@@ -228,10 +229,11 @@ def self_test() -> None:
 
     def volt_stiction(r, y):
         u = max(-6.0, min(6.0, 18.0 * (r - y)))
+        extra = spec.v_limit - 6.0 + 0.17
         if u > 0.0:
-            return u + 0.17
+            return u + extra
         if u < 0.0:
-            return u - 0.20
+            return u - extra
         return 0.0
 
     _feed_step(cap3, -0.7, 0.7, -0.7, 0.7, wn, zeta, 500, 2.0, t_rise, volt_stiction)
@@ -242,7 +244,7 @@ def self_test() -> None:
     _check("settling time is labeled on the angle plot", any("t_s=" in s for s in texts), str(texts))
     _check("overshoot is labeled on the angle plot", any("OS " in s for s in texts))
     _check("Vmax is labeled on the voltage plot", any("Vmax" in s for s in texts))
-    _check("preview voltage fails because of the stiction offset", mviz.pass_v is False and mviz.v_max > 6.0)
+    _check("preview voltage fails because of the stiction offset", mviz.pass_v is False and mviz.v_max > spec.v_limit)
     path = os.path.join(tempfile.gettempdir(), "step_response_analyzer_preview.png")
     fig.savefig(path, dpi=130)
     plt.close(fig)

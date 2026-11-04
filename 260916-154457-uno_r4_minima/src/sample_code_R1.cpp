@@ -79,9 +79,7 @@ float setMotorVoltageWithStiction(float volts) {
   // if (compensatedVoltage < -6.0f)
   //   compensatedVoltage = -6.0f;
 
-  // invert to make it such that a +ve voltage results in a CCW rotation (+ve by
-  // convention)
-  setMotorVoltage(-compensatedVoltage);
+  setMotorVoltage(compensatedVoltage);
   return compensatedVoltage;
 }
 // ================== Calibration & Conversions ==================
@@ -99,7 +97,7 @@ inline float ticks_to_radians(int ticks) {
 
 #define NUM_TARGETS 2
 float targetAngles[NUM_TARGETS] = {-0.7, 0.7};   // radians
-int targetDurations[NUM_TARGETS] = {500, 500}; // milliseconds
+int targetDurations[NUM_TARGETS] = {1000, 1000}; // milliseconds
 
 // ================== Control ISR ==================
 void interval_control_code(void) {
@@ -122,15 +120,20 @@ void interval_control_code(void) {
   float currentAngle = ticks_to_radians(motor);
   float targetAngle = targetAngles[currentTargetIndex];
   float voltage = setMotorVoltageWithStiction(controller(targetAngle, currentAngle));
-  Serial.print(millis());
-  Serial.print(",");
-  Serial.print(currentAngle, 5);
-  Serial.print(",");
-  Serial.print(targetAngle);
-  Serial.print(",");
-  Serial.print(voltage);
-  Serial.println();
-  
+
+  // This callback is the control timer ISR. SerialUSB::write() waits forever
+  // once the host stops reading, so skip the sample when the USB buffer cannot
+  // hold a full line.
+
+  if (Serial.availableForWrite() >= 64) {
+    Serial.print(currentAngle, 5);
+    Serial.print(',');
+    Serial.print(targetAngle);
+    Serial.print(',');
+    Serial.println(voltage);
+  }
+
+
 
   digitalWrite(
       A5, LOW); // A5 can be used to measure cycle time using an oscilloscope by

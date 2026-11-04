@@ -33,9 +33,9 @@ import matplotlib.animation as animation
 
 
 # ================= Configuration =================
-DEFAULT_BAUD = 115200
+DEFAULT_BAUD = 230400
 DEFAULT_PORT = "COM5"
-MAX_PLOT_POINTS = 300  # Number of samples visible in rolling plot
+MAX_PLOT_POINTS = 800  # Number of samples visible in rolling plot
 UPDATE_INTERVAL_MS = 30  # Plot refresh rate (~33 FPS)
 RECONNECT_DELAY_S = 0.5  # Polling interval during upload/reconnect
 MAX_LOG_ROWS = 5000  # Ceiling to prevent memory / clipboard crash (5k rows max per run)
@@ -137,17 +137,19 @@ class SerialDataLogger:
         self.thread.start()
 
     def toggle_pause(self):
-        """Toggle manual pause to explicitly release the COM port for an upload."""
+        """Ask the worker to release or reopen the COM port.
+
+        The plot window must not touch the port itself. Closing it while the
+        worker is blocked in readline() aborts the process on Windows, and
+        pulsing DTR makes the Uno R4 jump into the bootloader.
+        """
         self.paused = not self.paused
         if self.paused:
-            self._close_serial()
-            self._finalize_current_run()
-            self.status_message = "PAUSED (Port Released for Upload - Press Space to Resume)"
-            print("\n[!] Manual Pause: COM port closed and released. Ready for upload.")
-            print("[!] Press [Space] again in the plot window to reconnect and resume.")
+            self.status_message = "PAUSING (releasing port...)"
+            print("\n[!] Pause requested. Releasing the COM port without resetting the board.")
         else:
             self.status_message = "Resuming connection..."
-            print("\n[+] Resuming: Reconnecting to serial port...")
+            print("\n[+] Resume requested. Reconnecting...")
 
     def _start_new_run(self):
         """Start a brand new logging run and CSV file."""
@@ -202,6 +204,8 @@ class SerialDataLogger:
             self.csv_filename = None
 
     def _close_serial(self):
+        # Only the worker thread may call this. Closing from the plot window
+        # while readline() is blocked crashes the interpreter on Windows.
         if self.serial_conn:
             try:
                 self.serial_conn.close()
@@ -209,16 +213,56 @@ class SerialDataLogger:
                 pass
             self.serial_conn = None
 
+    def _open_serial(self, port):
+        """Open the port without the DTR low/high pulse.
+
+        On the Uno R4, baud 1200 together with DTR low is the bootloader
+        entry sequence. A reset pulse, or closing the port from another
+        thread, is what was taking the firmware down with the plotter.
+        """
+        conn = serial.Serial()
+        conn.port = port
+        conn.baudrate = self.baud
+        conn.timeout = 0.2
+        conn.write_timeout = 0
+        conn.dsrdtr = False
+        conn.rtscts = False
+        conn.open()
+        try:
+            conn.reset_input_buffer()
+        except Exception:
+            pass
+        return conn
+
     def _worker_loop(self):
         """Background thread handling continuous connection, reading, and auto-reconnect."""
+        try:
+            self._read_loop()
+        except Exception as e:
+            print(f"\n[!] Serial worker stopped: {e}")
+        finally:
+            self._close_serial()
+            self._finalize_current_run()
+
+    def _read_loop(self):
         reconnect_attempts = 0
+        pause_announced = False
 
         while self.running:
             # 1. Check if user paused manually
             if self.paused:
-                self._close_serial()
-                time.sleep(0.1)
+                if self.serial_conn is not None:
+                    self._close_serial()
+                    self._finalize_current_run()
+                if not pause_announced:
+                    self.status_message = "PAUSED (Port released - press Space to resume)"
+                    print("\n[!] COM port released. The control loop keeps running on the board.")
+                    print("[!] Press [Space] in the plot window to reconnect.")
+                    pause_announced = True
+                time.sleep(0.05)
                 continue
+
+            pause_announced = False
 
             # 2. If not connected, attempt connection / reconnection
             if self.serial_conn is None or not self.serial_conn.is_open:
@@ -228,17 +272,14 @@ class SerialDataLogger:
                 try:
                     reconnect_attempts += 1
                     self.status_message = f"Connecting to {target} (attempt #{reconnect_attempts})..."
-                    conn = serial.Serial(target, self.baud, timeout=0.5)
-                    try:
-                        conn.dtr = False
-                        time.sleep(0.05)
-                        conn.dtr = True
-                        conn.reset_input_buffer()
-                    except Exception:
-                        pass
+                    conn = self._open_serial(target)
 
                     self.serial_conn = conn
                     self.target_port = target
+                    if self.paused or not self.running:
+                        self._close_serial()
+                        continue
+
                     reconnect_attempts = 0
                     self.status_message = f"CONNECTED: {target} @ {self.baud} (Run #{self.run_number + 1})"
                     print(f"\n[+] Connected to {target} @ {self.baud} baud!")
@@ -314,11 +355,16 @@ class SerialDataLogger:
                 time.sleep(1.0)
 
     def stop(self):
-        if not self.running:
-            return
+        """Stop the worker and let it close the port itself."""
         self.running = False
-        self._close_serial()
-        self._finalize_current_run()
+        worker = self.thread
+        if worker is None or not worker.is_alive():
+            return
+        if threading.current_thread() is worker:
+            return
+        worker.join(timeout=3.0)
+        if worker.is_alive():
+            print("\n[!] Serial worker did not stop in time. The plot window did not force the port closed.")
 
 
 def run_plotter(port, baud, labels=None, max_rows=MAX_LOG_ROWS):
@@ -356,11 +402,11 @@ def run_plotter(port, baud, labels=None, max_rows=MAX_LOG_ROWS):
             state_str += f" [CAPPED AT {logger.max_rows} ROWS]"
 
         if "CONNECTED" in state_str:
-            indicator = "🟢"
-        elif "PAUSED" in state_str:
-            indicator = "🟡"
+            indicator = "[ON]"
+        elif "PAUSE" in state_str:
+            indicator = "[PAUSE]"
         else:
-            indicator = "🔴"
+            indicator = "[WAIT]"
 
         ax.set_title(
             f"{indicator} {state_str}\n"
@@ -431,7 +477,12 @@ def run_plotter(port, baud, labels=None, max_rows=MAX_LOG_ROWS):
     fig.canvas.mpl_connect("close_event", on_close)
 
     ani = animation.FuncAnimation(
-        fig, update_plot, init_func=init_plot, interval=UPDATE_INTERVAL_MS, blit=False
+        fig,
+        update_plot,
+        init_func=init_plot,
+        interval=UPDATE_INTERVAL_MS,
+        blit=False,
+        cache_frame_data=False,
     )
 
     try:

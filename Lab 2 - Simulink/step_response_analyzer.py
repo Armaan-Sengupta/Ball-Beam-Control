@@ -1,6 +1,8 @@
 """Live one-step analyzer for the ball-beam inner loop.
 
-Serial line at 230400 baud: millis, theta_rad, theta_ref_rad, voltage_V.
+Serial line at 230400 baud: theta_rad, theta_ref_rad, voltage_V.
+A leading millis column is optional. Without it, each sample is stamped
+with the host clock.
 Skips the first reference change, waits until the angle is steady at -0.7,
 then records the step to +0.7. Markers are the samples behind e_ss, 2% t_s,
 overshoot, and the +/-6 V check.
@@ -27,9 +29,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 # Lab 2 inner-loop defaults. Override from the command line.
-LAB_TS_MAX_S = 0.25
+LAB_TS_MAX_S = 0.4
 LAB_OS_MAX_PCT = 5.0
-LAB_V_LIMIT_V = 6.0
+LAB_V_LIMIT_V = 6.2
 LAB_ESS_TOL_RAD = 0.01  # tail-mean uncertainty is ~0.001 rad, so this is above the noise
 LAB_REF_A_RAD = -0.7
 LAB_REF_B_RAD = 0.7
@@ -1311,47 +1313,51 @@ def draw_step(
 
     ax_v.plot(t, volt, color=VOLT_C, lw=1.5, label="logged voltage", zorder=3)
     limit = LAB_V_LIMIT_V if spec is None else spec.v_limit
-    ax_v.axhline(limit, color=LIMIT_C, ls="--", lw=1.1, label=r"$\pm$6 V limit", zorder=1)
+    rail = f"\u00b1{limit:.1f} V limit"
+    ax_v.axhline(limit, color=LIMIT_C, ls="--", lw=1.1, label=rail, zorder=1)
     ax_v.axhline(-limit, color=LIMIT_C, ls="--", lw=1.1, zorder=1)
     if m.viol_t:
-        ax_v.scatter(m.viol_t, m.viol_v, s=16, color=PEAK_C, zorder=4, label="exceeds $\\pm$6 V")
+        ax_v.scatter(
+            m.viol_t, m.viol_v, s=22, color=PEAK_C, zorder=4,
+            label=f"exceeds \u00b1{limit:.1f} V",
+        )
     v_lo = min(-8.0, min(volt) - 1.4)
     v_hi = max(8.0, max(volt) + 1.4)
     ax_v.set_ylim(v_lo, v_hi)
+
+    def mark_extremum(t_mark, v_mark, marker):
+        past = abs(v_mark) > limit
+        color = PEAK_C if past else "#1f4e79"
+        ax_v.plot(
+            [t_mark], [v_mark], marker=marker, ms=8, color=color,
+            markeredgecolor="white", zorder=5,
+        )
+        # A point on the rail needs the label off the flat trace. A point near
+        # zero stays beside the sample, so it is not read as a fault callout.
+        on_rail = abs(v_mark) > 0.5 * limit
+        if v_mark >= 0:
+            dy = -28 if on_rail else 12
+        else:
+            dy = -12 if on_rail else 12
+        name = "Vmax" if marker == "^" else "Vmin"
+        ax_v.annotate(
+            f"{name} {v_mark:+.2f} V @ {t_mark:.3f}s",
+            xy=(t_mark, v_mark),
+            xytext=(12, dy),
+            textcoords="offset points",
+            fontsize=8,
+            color=color,
+            va="top" if dy < 0 else "bottom",
+            ha="left",
+            arrowprops=dict(arrowstyle="-", color=color, lw=0.6),
+            bbox=_label_bbox(color),
+            zorder=7,
+        )
+
     if m.v_max is not None:
-        ax_v.plot([m.v_max_t], [m.v_max], marker="^", ms=8, color=PEAK_C, markeredgecolor="white", zorder=5)
-        # The logged rail is flat through the marker, so a positive peak's
-        # label drops into the open area under the trace instead of sitting on it.
-        vmax_below = m.v_max >= 0.0
-        ax_v.annotate(
-            f"Vmax {m.v_max:+.2f} V @ {m.v_max_t:.3f}s",
-            xy=(m.v_max_t, m.v_max),
-            xytext=(14, -32 if vmax_below else 10),
-            textcoords="offset points",
-            fontsize=8,
-            color=PEAK_C,
-            va="top" if vmax_below else "bottom",
-            ha="left",
-            arrowprops=dict(arrowstyle="-", color=PEAK_C, lw=0.6),
-            bbox=_label_bbox(PEAK_C),
-            zorder=7,
-        )
+        mark_extremum(m.v_max_t, m.v_max, "^")
     if m.v_min is not None:
-        ax_v.plot([m.v_min_t], [m.v_min], marker="v", ms=8, color="#1f4e79", markeredgecolor="white", zorder=5)
-        vmin_below = m.v_min <= 0.0
-        ax_v.annotate(
-            f"Vmin {m.v_min:+.2f} V @ {m.v_min_t:.3f}s",
-            xy=(m.v_min_t, m.v_min),
-            xytext=(8, -8 if vmin_below else 8),
-            textcoords="offset points",
-            fontsize=8,
-            color="#1f4e79",
-            va="top" if vmin_below else "bottom",
-            ha="left",
-            arrowprops=dict(arrowstyle="-", color="#1f4e79", lw=0.6),
-            bbox=_label_bbox("#1f4e79"),
-            zorder=7,
-        )
+        mark_extremum(m.v_min_t, m.v_min, "v")
     ax_v.legend(loc="upper right", fontsize=8, framealpha=0.92)
 
     left = min(min(t), -0.002)
@@ -1405,6 +1411,7 @@ class SerialReader:
         self.status = "Starting..."
         self._conn = None
         self._bad = 0
+        self._clock: str | None = None
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
     def start(self) -> None:
@@ -1441,9 +1448,19 @@ class SerialReader:
             print("[serial] further non-numeric lines suppressed")
 
     def _handle_values(self, vals: list[float]) -> None:
-        if len(vals) != 4:
+        if len(vals) == 4:
+            t_ms, theta, ref, volt = vals
+            clock = "device"
+        elif len(vals) == 3:
+            theta, ref, volt = vals
+            t_ms = time.perf_counter() * 1000.0
+            clock = "host"
+        else:
             return
-        t_ms, theta, ref, volt = vals
+        if self._clock is None:
+            self._clock = clock
+            if clock == "host":
+                print("Serial lines have no millis. Stamping each sample with the host clock.")
         if self.log is not None:
             self.log.write(t_ms, theta, ref, volt)
         self.queue.put(("sample", t_ms, theta, ref, volt))
@@ -1499,7 +1516,7 @@ class SerialReader:
                 if not numeric or not vals or not all(math.isfinite(v) for v in vals):
                     self._note_bad(line)
                     continue
-                if len(vals) != 4:
+                if len(vals) not in (3, 4):
                     self._note_bad(line)
                     continue
                 self._bad = 0
@@ -1515,7 +1532,7 @@ class SerialReader:
 def print_banner(port: str, baud: int, spec: Spec, log_path: str) -> None:
     print(f"Step analyzer  {port} @ {baud}")
     print(f"Full log: {log_path}")
-    print("Line: millis, theta_rad, theta_ref_rad, voltage_V")
+    print("Line: theta_rad, theta_ref_rad, voltage_V   (leading millis is optional)")
     print(f"Skip the first step, then record {spec.ref_a:+.3f} -> {spec.ref_b:+.3f} once the angle is steady.")
     print(
         f"Checks: bounded, |e_ss|<={spec.ess_tol:.3f} rad, "
