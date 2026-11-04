@@ -6,12 +6,14 @@ then records the step to +0.7. Markers are the samples behind e_ss, 2% t_s,
 overshoot, and the +/-6 V check.
 
     python step_response_analyzer.py
+    python step_response_analyzer.py --file logs/full_YYYYMMDD_HHMMSS.csv
     python step_response_analyzer.py --self-test
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import os
 import queue
@@ -844,6 +846,109 @@ def _log_dir() -> str:
     return path
 
 
+class SessionLog:
+    """Every accepted serial sample, so the run can be drawn again with --file."""
+
+    def __init__(self):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.path = os.path.join(_log_dir(), f"full_{stamp}.csv")
+        self._f = open(self.path, "w", encoding="utf-8", newline="\n")
+        self._f.write("millis_ms,theta_rad,theta_ref_rad,voltage_V\n")
+        self._lock = threading.Lock()
+        self._n = 0
+        self._warned = False
+
+    def write(self, t_ms: float, theta: float, ref: float, volt: float) -> None:
+        line = f"{t_ms:.0f},{theta:.5f},{ref:.4f},{volt:.4f}\n"
+        with self._lock:
+            if self._f is None:
+                return
+            try:
+                self._f.write(line)
+                self._n += 1
+                if self._n % 50 == 0:
+                    self._f.flush()
+            except OSError as exc:
+                if not self._warned:
+                    print(f"Could not write the full log: {exc}")
+                    self._warned = True
+
+    def close(self) -> None:
+        with self._lock:
+            if self._f is None:
+                return
+            try:
+                self._f.flush()
+                self._f.close()
+            except OSError:
+                pass
+            self._f = None
+        print(f"Full log: {self.path}  ({self._n} samples)")
+
+
+def _cell(row: list[str], index: int) -> float:
+    return float(row[index])
+
+
+def load_samples(path: str) -> list[tuple[float, float, float, float]]:
+    """Rows of (millis_ms, theta, theta_ref, voltage). time_s columns become ms."""
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return []
+    first = [c.strip() for c in rows[0]]
+    start = 0
+    idx = (0, 1, 2, 3)
+    scale_t = 1.0
+    try:
+        [_cell(first, i) for i in range(len(first)) if first[i]]
+        headerless = True
+    except ValueError:
+        headerless = False
+    if not headerless:
+        names = [c.lower() for c in first]
+        start = 1
+
+        def col(*options: str) -> int | None:
+            for name in options:
+                if name in names:
+                    return names.index(name)
+            return None
+
+        t_i = col("millis_ms", "time_ms", "millis", "time_s")
+        th_i = col("theta_rad", "theta")
+        r_i = col("theta_ref_rad", "theta_ref")
+        v_i = col("voltage_v", "voltage")
+        if None in (t_i, th_i, r_i, v_i):
+            raise ValueError(f"Unrecognized columns in {path}: {', '.join(first)}")
+        idx = (t_i, th_i, r_i, v_i)
+        if names[t_i] == "time_s":
+            scale_t = 1000.0
+    samples: list[tuple[float, float, float, float]] = []
+    for row in rows[start:]:
+        if not row or not any(c.strip() for c in row):
+            continue
+        try:
+            samples.append((
+                _cell(row, idx[0]) * scale_t,
+                _cell(row, idx[1]),
+                _cell(row, idx[2]),
+                _cell(row, idx[3]),
+            ))
+        except (ValueError, IndexError):
+            continue
+    return samples
+
+
+def resolve_log_path(path: str) -> str:
+    if os.path.isfile(path):
+        return path
+    alt = os.path.join(_log_dir(), os.path.basename(path))
+    if os.path.isfile(alt):
+        return alt
+    raise FileNotFoundError(path)
+
+
 def _write_step_files(step: dict, body: str) -> tuple[str, str]:
     stamp = step["started_wall"].strftime("%Y%m%d_%H%M%S")
     base = os.path.join(_log_dir(), f"step_{step['index']:02d}_{stamp}")
@@ -1290,9 +1395,10 @@ def find_default_port(fallback: str = "COM5") -> str:
 
 
 class SerialReader:
-    def __init__(self, port: str, baud: int):
+    def __init__(self, port: str, baud: int, log: SessionLog | None = None):
         self.port = port
         self.baud = baud
+        self.log = log
         self.queue: queue.Queue = queue.Queue()
         self.running = True
         self.paused = False
@@ -1338,6 +1444,8 @@ class SerialReader:
         if len(vals) != 4:
             return
         t_ms, theta, ref, volt = vals
+        if self.log is not None:
+            self.log.write(t_ms, theta, ref, volt)
         self.queue.put(("sample", t_ms, theta, ref, volt))
 
     def _loop(self) -> None:
@@ -1404,8 +1512,9 @@ class SerialReader:
                 time.sleep(0.5)
 
 
-def print_banner(port: str, baud: int, spec: Spec) -> None:
+def print_banner(port: str, baud: int, spec: Spec, log_path: str) -> None:
     print(f"Step analyzer  {port} @ {baud}")
+    print(f"Full log: {log_path}")
     print("Line: millis, theta_rad, theta_ref_rad, voltage_V")
     print(f"Skip the first step, then record {spec.ref_a:+.3f} -> {spec.ref_b:+.3f} once the angle is steady.")
     print(
@@ -1416,12 +1525,50 @@ def print_banner(port: str, baud: int, spec: Spec) -> None:
     print()
 
 
+def replay_file(path: str, spec: Spec) -> None:
+    import matplotlib.pyplot as plt
+
+    samples = load_samples(path)
+    print(f"Replaying {len(samples)} samples from {path}")
+    if not samples:
+        return
+    capture = StepCapture(spec)
+    for t_ms, theta, ref, volt in samples:
+        if capture.push(t_ms, theta, ref, volt) == "end":
+            break
+    if capture.phase == "live":
+        capture.freeze("end of file")
+    if capture.step is not None:
+        finalize_capture(capture, "REPLAY")
+    else:
+        print(capture.hold_note)
+
+    fig, ax_ang, ax_v, ax_info = make_figure(plt)
+    try:
+        fig.canvas.manager.set_window_title("Step response replay")
+    except Exception:
+        pass
+    m = capture.metrics()
+    if capture.step is not None and m is not None:
+        draw_step(
+            ax_ang, ax_v, ax_info, capture.step, m, "frozen",
+            f"REPLAY  {os.path.basename(path)}", spec, capture.end_reason,
+        )
+    else:
+        draw_waiting(
+            ax_ang, ax_v, ax_info, list(capture.preview), capture.last_ref,
+            f"REPLAY  {os.path.basename(path)}", capture.hold_note,
+        )
+    plt.show()
+
+
 def run_plotter(port: str, baud: int, spec: Spec) -> None:
     import matplotlib.pyplot as plt
     from matplotlib import animation
 
-    print_banner(port, baud, spec)
-    reader = SerialReader(port, baud)
+    log = SessionLog()
+    print_banner(port, baud, spec, log.path)
+    reader = SerialReader(port, baud, log)
     capture = StepCapture(spec)
     reader.start()
 
@@ -1532,12 +1679,15 @@ def run_plotter(port: str, baud: int, spec: Spec) -> None:
         pass
     finally:
         reader.stop()
+        reader._thread.join(timeout=1.0)
+        log.close()
         del ani
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Live one-step response analyzer for the ball-beam inner loop.")
     parser.add_argument("--port", default=None, help="Serial port (default: auto-detect, else COM5)")
+    parser.add_argument("--file", default=None, help="replay a full log CSV from logs/ instead of the serial port")
     parser.add_argument("--baud", type=int, default=230400, help="Baud rate (default: 230400)")
     parser.add_argument("--ess-tol", type=float, default=LAB_ESS_TOL_RAD, help="rad, |e_ss| at or below this counts as zero")
     parser.add_argument("--ts-max", type=float, default=LAB_TS_MAX_S, help="seconds, 2%% settling-time limit")
@@ -1561,6 +1711,18 @@ def main() -> None:
         ss_std_max=args.ss_std,
         tail_s=args.tail,
     )
+    if args.file:
+        try:
+            import matplotlib.pyplot  # noqa: F401
+        except ImportError:
+            print("This script needs matplotlib:  pip install matplotlib")
+            raise
+        try:
+            replay_file(resolve_log_path(args.file), spec)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            print(exc)
+            raise SystemExit(1) from exc
+        return
     try:
         import serial  # noqa: F401
         import matplotlib.pyplot  # noqa: F401
