@@ -60,8 +60,8 @@ float controller(float targetAngle, float currentAngle) {
 }
 
 // ================== Stiction / Deadband Compensation ==================
-const float STICTION_CW = 0.17f;
-const float STICTION_CCW = 0.20f;
+const float STICTION_CW = -0.08;
+const float STICTION_CCW = -0.46;
 const float DEADBAND_EPS = 0.0f;
 
 float setMotorVoltageWithStiction(float volts) {
@@ -70,7 +70,7 @@ float setMotorVoltageWithStiction(float volts) {
   if (volts > DEADBAND_EPS) {
     compensatedVoltage = volts + STICTION_CW;
   } else if (volts < -DEADBAND_EPS) {
-    compensatedVoltage = volts - STICTION_CCW;
+    compensatedVoltage = volts + STICTION_CCW;
   } else {
     compensatedVoltage = 0.0f;
   }
@@ -99,9 +99,13 @@ inline float ticks_to_radians(int ticks) {
   return (ticks - ZERO_OFFSET_TICKS) * SLOPE_DEG_PER_TICK * DEG_TO_RAD;
 }
 
-#define NUM_TARGETS 2
-float targetAngles[NUM_TARGETS] = {-0.7, 0.7};   // radians
-int targetDurations[NUM_TARGETS] = {1000, 1000}; // milliseconds
+inline float ball_pos_to_m(int pos) {
+  return 0.01372830381 + 0.00002447997789*((float)pos);
+}
+
+#define NUM_TARGETS 1
+float targetAngles[NUM_TARGETS] = {0.7};   // radians
+int targetDurations[NUM_TARGETS] = {2000}; // milliseconds
 
 // ================== Control ISR ==================
 void interval_control_code(void) {
@@ -124,6 +128,7 @@ void interval_control_code(void) {
   float currentAngle = ticks_to_radians(motor);
   float targetAngle = targetAngles[currentTargetIndex];
   float voltage = setMotorVoltageWithStiction(controller(targetAngle, currentAngle));
+  float ballPosition = ball_pos_to_m(ball);
 
   // This callback is the control timer ISR. SerialUSB::write() waits forever
   // once the host stops reading, so skip the sample when the USB buffer cannot
@@ -134,7 +139,10 @@ void interval_control_code(void) {
     Serial.print(',');
     Serial.print(targetAngle);
     Serial.print(',');
-    Serial.println(voltage);
+    Serial.print(voltage);
+    Serial.print(',');
+    Serial.print(ballPosition,5);
+    Serial.println();
   }
 
 

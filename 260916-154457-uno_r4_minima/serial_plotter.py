@@ -48,6 +48,7 @@ SIGNAL_LABELS = [
     "Current_Angle",
     "Target_Angle",
     "Voltage_Command",
+    "Ball_Position"
 ]
 
 
