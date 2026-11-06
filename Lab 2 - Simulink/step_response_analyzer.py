@@ -31,7 +31,8 @@ from datetime import datetime
 # Lab 2 inner-loop defaults. Override from the command line.
 LAB_TS_MAX_S = 0.4
 LAB_OS_MAX_PCT = 5.0
-LAB_V_LIMIT_V = 6.2
+LAB_V_POS_V = 6 - 0.08  # fail when logged voltage is above this
+LAB_V_NEG_V = 6 + 0.46  # fail when logged voltage is below the negative of this
 LAB_ESS_TOL_RAD = 0.01  # tail-mean uncertainty is ~0.001 rad, so this is above the noise
 LAB_REF_A_RAD = -0.7
 LAB_REF_B_RAD = 0.7
@@ -62,7 +63,8 @@ class Spec:
     settle_frac: float = 0.02
     ts_max: float = LAB_TS_MAX_S
     os_max_pct: float = LAB_OS_MAX_PCT
-    v_limit: float = LAB_V_LIMIT_V
+    v_pos: float = LAB_V_POS_V
+    v_neg: float = LAB_V_NEG_V
     ess_tol: float = LAB_ESS_TOL_RAD
     tail_s: float = TAIL_S
     ss_std_max: float = SS_STD_MAX_RAD
@@ -212,7 +214,7 @@ def _is_lab_step(r0: float, r1: float, spec: Spec) -> bool:
     )
 
 
-def _voltage(t, v, limit):
+def _voltage(t, v, v_pos, v_neg):
     imax = 0
     imin = 0
     viol_t: list[float] = []
@@ -222,7 +224,7 @@ def _voltage(t, v, limit):
             imax = i
         if vi < v[imin]:
             imin = i
-        if vi > limit or vi < -limit:
+        if vi > v_pos or vi < -v_neg:
             viol_t.append(t[i])
             viol_v.append(vi)
     return v[imin], t[imin], v[imax], t[imax], viol_t, viol_v
@@ -373,7 +375,7 @@ def _overshoot(t, theta, y0, theta_ss):
 def compute_metrics(t, theta, voltage, y0, r0, r1, spec: Spec) -> Metrics | None:
     if not t:
         return None
-    v_min, v_min_t, v_max, v_max_t, viol_t, viol_v = _voltage(t, voltage, spec.v_limit)
+    v_min, v_min_t, v_max, v_max_t, viol_t, viol_v = _voltage(t, voltage, spec.v_pos, spec.v_neg)
     stability, stability_reason, growth_marks = _stability(t, theta, y0, r1, spec)
     ss = _steady_state(t, theta, y0, r1, spec)
 
@@ -549,7 +551,10 @@ def format_report(m: Metrics, spec: Spec, end_reason: str | None, step_index: in
         )
     else:
         lines.append(f"OS: {_word(m.pass_os)}  {m.os_note}  <= {spec.os_max_pct:.1f}%")
-    voltage = f"Voltage: {_word(m.pass_v)}  outside +/-{spec.v_limit:.1f} V: {len(m.viol_t)}"
+    voltage = (
+        f"Voltage: {_word(m.pass_v)}  "
+        f"outside +{spec.v_pos:.1f}/-{spec.v_neg:.1f} V: {len(m.viol_t)}"
+    )
     if m.v_max is not None:
         voltage += f"  max {m.v_max:+.2f} @ {m.v_max_t:.3f}s  min {m.v_min:+.2f} @ {m.v_min_t:.3f}s"
     lines.append(voltage)
@@ -1171,7 +1176,10 @@ def _style_voltage(ax) -> None:
     ax.grid(True, linestyle="--", alpha=0.55)
 
 
-def draw_waiting(ax_ang, ax_v, ax_info, preview, current_ref, suptitle: str, note: str = "") -> None:
+def draw_waiting(
+    ax_ang, ax_v, ax_info, preview, current_ref, suptitle: str, note: str = "",
+    v_pos: float = LAB_V_POS_V, v_neg: float = LAB_V_NEG_V,
+) -> None:
     fig = ax_ang.figure
     ax_ang.cla()
     ax_v.cla()
@@ -1188,8 +1196,8 @@ def draw_waiting(ax_ang, ax_v, ax_info, preview, current_ref, suptitle: str, not
         ax_ang.plot(ts, ref, color=REF_C, lw=1.4, drawstyle="steps-post", label=r"$\theta_{ref}$")
         ax_ang.legend(loc="upper left", fontsize=8, framealpha=0.92)
         ax_v.plot(ts, volt, color=VOLT_C, lw=1.4, label="logged voltage")
-        ax_v.axhline(LAB_V_LIMIT_V, color=LIMIT_C, ls="--", lw=1.0, label=r"$\pm$6 V limit")
-        ax_v.axhline(-LAB_V_LIMIT_V, color=LIMIT_C, ls="--", lw=1.0)
+        ax_v.axhline(v_pos, color=LIMIT_C, ls="--", lw=1.0, label=f"+{v_pos:.1f} V")
+        ax_v.axhline(-v_neg, color=LIMIT_C, ls="--", lw=1.0, label=f"-{v_neg:.1f} V")
         ax_v.legend(loc="upper left", fontsize=8, framealpha=0.92)
         ax_v.set_xlim(min(ts), 0.0)
         ymin = min(-7.5, min(volt) - 0.4)
@@ -1312,21 +1320,22 @@ def draw_step(
     ax_ang.legend(loc=loc, fontsize=8, framealpha=0.92)
 
     ax_v.plot(t, volt, color=VOLT_C, lw=1.5, label="logged voltage", zorder=3)
-    limit = LAB_V_LIMIT_V if spec is None else spec.v_limit
-    rail = f"\u00b1{limit:.1f} V limit"
-    ax_v.axhline(limit, color=LIMIT_C, ls="--", lw=1.1, label=rail, zorder=1)
-    ax_v.axhline(-limit, color=LIMIT_C, ls="--", lw=1.1, zorder=1)
+    v_pos = LAB_V_POS_V if spec is None else spec.v_pos
+    v_neg = LAB_V_NEG_V if spec is None else spec.v_neg
+    ax_v.axhline(v_pos, color=LIMIT_C, ls="--", lw=1.1, label=f"+{v_pos:.1f} V", zorder=1)
+    ax_v.axhline(-v_neg, color=LIMIT_C, ls="--", lw=1.1, label=f"-{v_neg:.1f} V", zorder=1)
     if m.viol_t:
         ax_v.scatter(
             m.viol_t, m.viol_v, s=22, color=PEAK_C, zorder=4,
-            label=f"exceeds \u00b1{limit:.1f} V",
+            label=f"outside +{v_pos:.1f}/-{v_neg:.1f} V",
         )
     v_lo = min(-8.0, min(volt) - 1.4)
     v_hi = max(8.0, max(volt) + 1.4)
     ax_v.set_ylim(v_lo, v_hi)
 
     def mark_extremum(t_mark, v_mark, marker):
-        past = abs(v_mark) > limit
+        rail = v_pos if v_mark >= 0 else v_neg
+        past = v_mark > v_pos or v_mark < -v_neg
         color = PEAK_C if past else "#1f4e79"
         ax_v.plot(
             [t_mark], [v_mark], marker=marker, ms=8, color=color,
@@ -1334,7 +1343,7 @@ def draw_step(
         )
         # A point on the rail needs the label off the flat trace. A point near
         # zero stays beside the sample, so it is not read as a fault callout.
-        on_rail = abs(v_mark) > 0.5 * limit
+        on_rail = abs(v_mark) > 0.5 * rail
         if v_mark >= 0:
             dy = -28 if on_rail else 12
         else:
@@ -1536,7 +1545,8 @@ def print_banner(port: str, baud: int, spec: Spec, log_path: str) -> None:
     print(f"Skip the first step, then record {spec.ref_a:+.3f} -> {spec.ref_b:+.3f} once the angle is steady.")
     print(
         f"Checks: bounded, |e_ss|<={spec.ess_tol:.3f} rad, "
-        f"t_s<={spec.ts_max:.3f}s, OS<={spec.os_max_pct:.0f}%, |V|<={spec.v_limit:.0f}"
+        f"t_s<={spec.ts_max:.3f}s, OS<={spec.os_max_pct:.0f}%, "
+        f"V within +{spec.v_pos:.1f}/-{spec.v_neg:.1f}"
     )
     print("Keys: M freeze   N next step   Space release port (DTR reset on connect)")
     print()
@@ -1574,7 +1584,7 @@ def replay_file(path: str, spec: Spec) -> None:
     else:
         draw_waiting(
             ax_ang, ax_v, ax_info, list(capture.preview), capture.last_ref,
-            f"REPLAY  {os.path.basename(path)}", capture.hold_note,
+            f"REPLAY  {os.path.basename(path)}", capture.hold_note, spec.v_pos, spec.v_neg,
         )
     plt.show()
 
@@ -1640,7 +1650,8 @@ def run_plotter(port: str, baud: int, spec: Spec) -> None:
                     print("\n" + capture.hold_note)
                     state["note"] = capture.hold_note
                 draw_waiting(
-                    ax_ang, ax_v, ax_info, list(capture.preview), capture.last_ref, title, capture.hold_note
+                    ax_ang, ax_v, ax_info, list(capture.preview), capture.last_ref,
+                    title, capture.hold_note, spec.v_pos, spec.v_neg,
                 )
             else:
                 draw_step(
@@ -1709,7 +1720,9 @@ def main() -> None:
     parser.add_argument("--ess-tol", type=float, default=LAB_ESS_TOL_RAD, help="rad, |e_ss| at or below this counts as zero")
     parser.add_argument("--ts-max", type=float, default=LAB_TS_MAX_S, help="seconds, 2%% settling-time limit")
     parser.add_argument("--os-max", type=float, default=LAB_OS_MAX_PCT, help="percent overshoot limit")
-    parser.add_argument("--v-limit", type=float, default=LAB_V_LIMIT_V, help="volt limit, symmetric")
+    parser.add_argument("--v-pos", type=float, default=None, help="positive voltage rail, volts")
+    parser.add_argument("--v-neg", type=float, default=None, help="negative voltage rail magnitude, volts")
+    parser.add_argument("--v-limit", type=float, default=None, help="set both voltage rails")
     parser.add_argument("--ss-std", type=float, default=SS_STD_MAX_RAD, help="rad, max tail std to call steady state")
     parser.add_argument("--tail", type=float, default=TAIL_S, help="seconds, steady-state window")
     parser.add_argument("--self-test", action="store_true", help="check the metric definitions and exit")
@@ -1724,7 +1737,8 @@ def main() -> None:
         ess_tol=args.ess_tol,
         ts_max=args.ts_max,
         os_max_pct=args.os_max,
-        v_limit=args.v_limit,
+        v_pos=args.v_pos if args.v_pos is not None else (args.v_limit if args.v_limit is not None else LAB_V_POS_V),
+        v_neg=args.v_neg if args.v_neg is not None else (args.v_limit if args.v_limit is not None else LAB_V_NEG_V),
         ss_std_max=args.ss_std,
         tail_s=args.tail,
     )
