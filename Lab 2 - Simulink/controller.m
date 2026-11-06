@@ -51,7 +51,7 @@ V_init = abs(b1 * 1.4);
 fprintf('Max Initial Voltage for 1.4 rad step: |V(0+)| = %.3f V (Limit: 6.0 V)\n\n', V_init);
 
 % Construct Controller
-C1 = tf([b1 b0], [a1 a0]);
+C1 = tf([b1 b0], [a1 a0])
 
 %% 4. Closed-Loop Transfer Functions & Performance
 % Feedback returns a transfer function
