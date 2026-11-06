@@ -104,8 +104,8 @@ inline float ball_pos_to_m(int pos) {
 }
 
 #define NUM_TARGETS 1
-float targetAngles[NUM_TARGETS] = {0.7};   // radians
-int targetDurations[NUM_TARGETS] = {2000}; // milliseconds
+float targetAngles[NUM_TARGETS] = {-0.7, 0.7};   // radians
+int targetDurations[NUM_TARGETS] = {2000, 2000}; // milliseconds
 
 // ================== Control ISR ==================
 void interval_control_code(void) {
