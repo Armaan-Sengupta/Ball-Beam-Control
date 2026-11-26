@@ -59,6 +59,33 @@ float controller(float targetAngle, float currentAngle) {
   return controlSignal;
 }
 
+float outerController(float targetPosition, float currentPosition) {
+  // Use double (64-bit) so 15-digit Tustin coefficients do not suffer
+  static double last_error = 0.0;
+  static double last_theta_ref = 0.0;
+
+  const double b1_outer = -6.984987531172070;
+  const double b0_outer =  6.980099750623441;
+  const double a0_outer = -0.995012468827930;
+
+  double error = (double)targetPosition - (double)currentPosition; // meters
+  double theta_ref = (b1_outer * error) + (b0_outer * last_error) - (a0_outer * last_theta_ref);
+
+  // Store unsaturated output (lab manual cautions: "do not feed back saturated output")
+  last_error = error;
+  last_theta_ref = theta_ref;
+
+  // Gear angle saturator in a separate variable before passing to inner loop
+  double theta_ref_sat = theta_ref;
+  if (theta_ref_sat > 0.7) {
+    theta_ref_sat = 0.7;
+  } else if (theta_ref_sat < -0.7) {
+    theta_ref_sat = -0.7;
+  }
+
+  return (float)theta_ref_sat;
+}
+
 // ================== Stiction / Deadband Compensation ==================
 const float STICTION_CW = -0.08;
 const float STICTION_CCW = -0.46;
@@ -103,9 +130,9 @@ inline float ball_pos_to_m(int pos) {
   return 0.01372830381 + 0.00002447997789*((float)pos);
 }
 
-#define NUM_TARGETS 1
-float targetAngles[NUM_TARGETS] = {-0.7, 0.7};   // radians
-int targetDurations[NUM_TARGETS] = {2000, 2000}; // milliseconds
+#define NUM_TARGETS 2
+float targetPositions[NUM_TARGETS] = {0.10f, 0.25f};         // meters
+unsigned long targetDurations[NUM_TARGETS] = {10000, 10000}; // milliseconds (20 s period, 50% duty)
 
 // ================== Control ISR ==================
 void interval_control_code(void) {
@@ -116,7 +143,7 @@ void interval_control_code(void) {
   static unsigned long lastSwitchTime = 0;
   static int currentTargetIndex = 0;
 
-  if (millis() - lastSwitchTime > targetDurations[currentTargetIndex]) {
+  if (millis() - lastSwitchTime >= targetDurations[currentTargetIndex]) {
     currentTargetIndex = (currentTargetIndex + 1) % NUM_TARGETS;
     lastSwitchTime = millis();
   }
@@ -126,9 +153,10 @@ void interval_control_code(void) {
   int ball = analogRead(BAL_PIN);
 
   float currentAngle = ticks_to_radians(motor);
-  float targetAngle = targetAngles[currentTargetIndex];
-  float voltage = setMotorVoltageWithStiction(controller(targetAngle, currentAngle));
   float ballPosition = ball_pos_to_m(ball);
+  float targetPosition = targetPositions[currentTargetIndex];
+  float targetAngle = outerController(targetPosition, ballPosition);
+  float voltage = setMotorVoltageWithStiction(controller(targetAngle, currentAngle));
 
   // This callback is the control timer ISR. SerialUSB::write() waits forever
   // once the host stops reading, so skip the sample when the USB buffer cannot
@@ -137,11 +165,13 @@ void interval_control_code(void) {
   if (Serial.availableForWrite() >= 64) {
     Serial.print(currentAngle, 5);
     Serial.print(',');
-    Serial.print(targetAngle);
+    Serial.print(targetAngle, 5);
     Serial.print(',');
-    Serial.print(voltage);
+    Serial.print(voltage, 5);
     Serial.print(',');
-    Serial.print(ballPosition,5);
+    Serial.print(ballPosition, 5);
+    Serial.print(',');
+    Serial.print(targetPosition, 5);
     Serial.println();
   }
 
