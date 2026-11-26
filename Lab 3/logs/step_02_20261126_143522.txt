@@ -1,0 +1,8 @@
+Step 2: y_ref +0.1000 -> +0.2500 m
+y(0-) = +0.0905 m    9.993 s, 5000 samples, dt 0.97 ms
+Capture: reference stepped away
+Stability: STABLE PASS  bounded; tracking-error peaks are not growing
+e_ss = +0.0489 m FAIL  y_ss=+0.2011 over [9.512, 9.993] s  std 0.0003 slope -0.0002  |e_ss|<=0.010
+t_s = 7.486 s PASS  band +/-0.0022 m  <= 8.500 s  first sample whose trailing 5-sample median is inside the band and stays inside
+OS = 68.23% FAIL  peak +0.2766 at 3.157 s  <= 45.0%
+Voltage: PASS  outside +5.9/-6.5 V: 0  max +2.86 @ 0.013s  min -1.36 @ 0.541s
