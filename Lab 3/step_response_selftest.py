@@ -102,33 +102,34 @@ def self_test() -> None:
     _check("steady state is the final position", abs(m.y_ss - 0.25) < 1e-3, f"ss={m.y_ss}")
     _check("tracking error passes", m.pass_ess is True and abs(m.e_ss) < 1e-3)
     _check("overshoot near 30.9%", abs(m.overshoot_pct - os_frac * 100.0) < 0.3, f"OS={m.overshoot_pct}")
-    _check("overshoot passes 45%", m.pass_os is True)
+    _check("overshoot passes < 45%", m.pass_os is True)
     _check("peak is after the rise and past y_ss", m.peak_t > 0.5 and m.peak_y > m.y_ss)
-    _check("settling sample is after the peak (OS > 2%)", m.ts is not None and m.ts > m.peak_t)
+    _check("settling sample is after the peak (OS > 6.7%)", m.ts is not None and m.ts > m.peak_t)
     _check("settling passes 8.5 s", m.pass_ts is True and m.ts <= spec.ts_max)
+    _check("0.25 m band is +/-0.010 m", abs(m.band_half - 0.010) < 1e-12)
     # Independent restatement of the settling definition, on the same median.
     n = cap.step["n_pre"]
     t_post = cap.step["t"][n:]
     y_post = _trailing_median(cap.step["y"][n:], spec.settle_median_n)
     last_out = None
     for i, yi in enumerate(y_post):
-        if abs(yi - m.y_ss) > m.band_half:
+        if abs(yi - m.r1) > m.band_half:
             last_out = i
     exp_ts = t_post[0] if last_out is None else t_post[last_out + 1]
     _check("t_s matches the last-exit definition", abs(m.ts - exp_ts) < 1e-12, f"{m.ts} vs {exp_ts}")
     idx = next(i for i, ti in enumerate(t_post) if abs(ti - m.ts) < 1e-12)
-    _check("settling sample is inside the band", abs(y_post[idx] - m.y_ss) <= m.band_half)
-    _check("sample before t_s is outside the band", abs(y_post[idx - 1] - m.y_ss) > m.band_half)
+    _check("settling sample is inside the band", abs(y_post[idx] - m.r1) <= m.band_half)
+    _check("sample before t_s is outside the band", abs(y_post[idx - 1] - m.r1) > m.band_half)
     _check(
         "every later sample stays inside",
-        all(abs(yi - m.y_ss) <= m.band_half for yi in y_post[idx:]),
+        all(abs(yi - m.r1) <= m.band_half for yi in y_post[idx:]),
     )
     _check("voltage on the rail passes", m.pass_v is True and m.v_max <= 6.0 + 1e-9)
     _check("Vmax is at step start", m.v_max_t < 0.05)
     _check("stable", m.stability == "STABLE" and m.pass_stable is True)
     _check("post-step count excludes the pre-roll and the next edge", m.n_post == 5000)
 
-    print("overshoot inside the 2% band settles before the peak")
+    print("overshoot inside the target band settles before the peak")
     t = [i * 0.002 for i in range(5000)]
     z2, wn2 = 0.9, 2.0
     y = [_underdamped(ti, 0.10, 0.25, wn2, z2) for ti in t]
@@ -144,6 +145,7 @@ def self_test() -> None:
     mn = compute_metrics(t, y, v, 0.25, 0.25, 0.10, spec)
     _check("negative-step overshoot is still a positive percent", abs(mn.overshoot_pct - os_frac * 100.0) < 0.3)
     _check("peak is beyond y_ss in the negative direction", mn.peak_y < mn.y_ss)
+    _check("0.10 m band is +/-0.006 m", abs(mn.band_half - 0.006) < 1e-12)
     _check("negative lab step recognized", mn.lab_step and mn.pass_os is True and mn.pass_ess is True)
 
     print("voltage past the rail")
@@ -205,6 +207,35 @@ def self_test() -> None:
         gate.push(t_rise + 10.0 + i * 2.0, 0.10, 0.10, 0.0)
     ev = gate.push(t_rise + 10.0 + 600 * 2.0, 0.10, 0.25, 1.0)
     _check("the next capture does not skip another step", ev == "start")
+
+    print("bidirectional capture (both / pos / neg)")
+    both_cap = StepCapture(Spec(step_dir="both"))
+    for i in range(10):
+        both_cap.push(i * 2.0, 0.10, 0.10, 0.0)
+    both_cap.push(20.0, 0.10, 0.25, 0.0)  # skip first edge
+    for i in range(600):
+        both_cap.push(22.0 + i * 2.0, 0.25, 0.25, 0.0)
+    _check("both-mode arms at steady 0.25 m", both_cap.ready)
+    ev_neg = both_cap.push(22.0 + 600 * 2.0, 0.25, 0.10, 0.0)
+    _check("both-mode records -ve step (0.25 -> 0.10 m)", ev_neg == "start" and both_cap.step["r0"] == 0.25 and both_cap.step["r1"] == 0.10)
+    both_cap.arm()
+    for i in range(600):
+        both_cap.push(1300.0 + i * 2.0, 0.10, 0.10, 0.0)
+    _check("both-mode arms at steady 0.10 m after arm()", both_cap.ready)
+    ev_pos = both_cap.push(1300.0 + 600 * 2.0, 0.10, 0.25, 0.0)
+    _check("both-mode records +ve step (0.10 -> 0.25 m)", ev_pos == "start" and both_cap.step["r0"] == 0.10 and both_cap.step["r1"] == 0.25)
+
+    pos_only = StepCapture(Spec(step_dir="pos"))
+    pos_only.skipped_first = True
+    for i in range(600):
+        pos_only.push(i * 2.0, 0.25, 0.25, 0.0)
+    _check("pos-only does not arm on 0.25 m", not pos_only.ready)
+
+    neg_only = StepCapture(Spec(step_dir="neg"))
+    neg_only.skipped_first = True
+    for i in range(600):
+        neg_only.push(i * 2.0, 0.10, 0.10, 0.0)
+    _check("neg-only does not arm on 0.10 m", not neg_only.ready)
 
     print("5-col serial stream and CSV log")
     sr = SerialReader("COM0", 230400)

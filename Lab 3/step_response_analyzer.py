@@ -6,8 +6,9 @@ Serial line at 230400 baud:
 A leading millis column is optional. Without it, each sample is stamped
 with the host clock.
 Skips the first reference change, waits until the ball position is steady
-at 0.10 m, then records the step to 0.25 m. Markers are the samples behind
-e_ss, 2% t_s, overshoot, and the +/-6 V check.
+at a reference level (0.10 m or 0.25 m by default), then records the next
+step (0.10 -> 0.25 m or 0.25 -> 0.10 m). Markers are the samples behind
+e_ss, target-band t_s, overshoot, and the +/-6 V check.
 
     python step_response_analyzer.py
     python step_response_analyzer.py --file logs/full_YYYYMMDD_HHMMSS.csv
@@ -30,12 +31,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 
-# Lab 3 outer-loop defaults. Override from the command line.
+# Lab 3(e) / Demo IRL outer-loop defaults. Override from the command line.
 LAB_TS_MAX_S = 8.5
 LAB_OS_MAX_PCT = 45.0
 LAB_V_POS_V = 6 - 0.08  # fail when logged voltage is above this
 LAB_V_NEG_V = 6 + 0.46  # fail when logged voltage is below the negative of this
-LAB_ESS_TOL_M = 0.010   # Lab 3(e) steady-state band at 0.25 m is +/-0.010 m (0.240..0.260 m)
+LAB_ESS_TOL_A_M = 0.006 # at 0.10 m, ball must remain in [0.094, 0.106] m
+LAB_ESS_TOL_B_M = 0.010 # at 0.25 m, ball must remain in [0.240, 0.260] m
 LAB_REF_A_M = 0.10
 LAB_REF_B_M = 0.25
 
@@ -52,12 +54,12 @@ PRE_STEP_S = 0.50            # pre-step baseline included before t=0 on step plo
 
 @dataclass
 class Spec:
-    settle_frac: float = 0.02
     ts_max: float = LAB_TS_MAX_S
     os_max_pct: float = LAB_OS_MAX_PCT
     v_pos: float = LAB_V_POS_V
     v_neg: float = LAB_V_NEG_V
-    ess_tol: float = LAB_ESS_TOL_M
+    ess_tol_a: float = LAB_ESS_TOL_A_M
+    ess_tol_b: float = LAB_ESS_TOL_B_M
     tail_s: float = TAIL_S
     ss_std_max: float = SS_STD_MAX_M
     ss_slope_max: float = SS_SLOPE_MAX_MPS
@@ -71,6 +73,7 @@ class Spec:
     ref_a: float = LAB_REF_A_M
     ref_b: float = LAB_REF_B_M
     ref_tol: float = 0.02
+    step_dir: str = "both"  # "both", "pos" (ref_a->ref_b), or "neg" (ref_b->ref_a)
     runaway_abs_m: float = 0.60
     runaway_err_m: float = 0.30
     growth_ratio: float = 1.15
@@ -365,6 +368,14 @@ def _overshoot(t, y, y0, y_ss):
     return pct, t[best_i], y[best_i]
 
 
+def _target_tol(r1: float, spec: Spec) -> float:
+    if abs(r1 - spec.ref_a) <= spec.ref_tol:
+        return spec.ess_tol_a
+    if abs(r1 - spec.ref_b) <= spec.ref_tol:
+        return spec.ess_tol_b
+    return spec.ess_tol_b
+
+
 def compute_metrics(t, y, voltage, y0, r0, r1, spec: Spec) -> Metrics | None:
     if not t:
         return None
@@ -373,7 +384,7 @@ def compute_metrics(t, y, voltage, y0, r0, r1, spec: Spec) -> Metrics | None:
     ss = _steady_state(t, y, y0, r1, spec)
 
     e_ss = None
-    band_half = None
+    band_half = _target_tol(r1, spec)
     ts = ts_y = None
     outside_now = False
     ts_note = "waiting for a flat steady state"
@@ -383,32 +394,31 @@ def compute_metrics(t, y, voltage, y0, r0, r1, spec: Spec) -> Metrics | None:
 
     if ss.confident and ss.y_ss is not None:
         e_ss = r1 - ss.y_ss
-        pass_ess = abs(e_ss) <= spec.ess_tol
         if ss.moved:
-            move = abs(ss.y_ss - y0)
-            band_half = spec.settle_frac * move
             ts, ts_y, outside_now = _settling(
-                t, y, ss.y_ss, band_half, spec.settle_median_n
+                t, y, r1, band_half, spec.settle_median_n
             )
+            pass_ess = abs(e_ss) <= band_half and not outside_now
             elapsed = t[-1] - t[0]
             if outside_now:
-                ts_note = f"still outside the band at t={elapsed:.3f} s"
+                ts_note = f"still outside [{r1 - band_half:.3f}, {r1 + band_half:.3f}] m at t={elapsed:.3f} s"
                 pass_ts = False if elapsed > spec.ts_max else None
             elif spec.settle_median_n > 1:
                 ts_note = (
                     f"first sample whose trailing {spec.settle_median_n}-sample "
-                    "median is inside the band and stays inside"
+                    "median stays in target band"
                 )
                 pass_ts = ts is not None and ts <= spec.ts_max
             else:
-                ts_note = "first sample inside the band that stays inside"
+                ts_note = "first sample inside target band that stays inside"
                 pass_ts = ts is not None and ts <= spec.ts_max
             ov = _overshoot(t, y, y0, ss.y_ss)
             if ov is not None:
                 os_pct, peak_t, peak_y = ov
                 os_note = "peak past y_ss, in the direction of the step"
-                pass_os = os_pct <= spec.os_max_pct
+                pass_os = os_pct < spec.os_max_pct
         else:
+            pass_ess = abs(e_ss) <= band_half
             ts_note = "ball never left the initial position"
             os_note = "ball never left the initial position"
 
@@ -525,25 +535,26 @@ def format_report(m: Metrics, spec: Spec, end_reason: str | None, step_index: in
     if m.e_ss is None:
         lines.append(f"e_ss: {_word(m.pass_ess)}  {m.ss.reason}")
     else:
+        tol = m.band_half if m.band_half is not None else _target_tol(m.r1, spec)
         lines.append(
             f"e_ss = {m.e_ss:+.4f} m {_word(m.pass_ess)}  "
             f"y_ss={m.y_ss:+.4f} over [{m.ss.t0:.3f}, {m.ss.t1:.3f}] s  "
-            f"std {m.ss.std:.4f} slope {m.ss.slope:+.4f}  |e_ss|<={spec.ess_tol:.3f}"
+            f"std {m.ss.std:.4f} slope {m.ss.slope:+.4f}  band [{m.r1 - tol:.3f}, {m.r1 + tol:.3f}] m"
         )
     if m.ts is not None and m.band_half is not None:
         lines.append(
             f"t_s = {m.ts:.3f} s {_word(m.pass_ts)}  "
-            f"band +/-{m.band_half:.4f} m  <= {spec.ts_max:.3f} s  {m.ts_note}"
+            f"band [{m.r1 - m.band_half:.3f}, {m.r1 + m.band_half:.3f}] m  <= {spec.ts_max:.3f} s  {m.ts_note}"
         )
     else:
         lines.append(f"t_s: {_word(m.pass_ts)}  {m.ts_note}  <= {spec.ts_max:.3f} s")
     if m.overshoot_pct is not None:
         lines.append(
             f"OS = {m.overshoot_pct:.2f}% {_word(m.pass_os)}  "
-            f"peak {m.peak_y:+.4f} at {m.peak_t:.3f} s  <= {spec.os_max_pct:.1f}%"
+            f"peak {m.peak_y:+.4f} at {m.peak_t:.3f} s  < {spec.os_max_pct:.1f}%"
         )
     else:
-        lines.append(f"OS: {_word(m.pass_os)}  {m.os_note}  <= {spec.os_max_pct:.1f}%")
+        lines.append(f"OS: {_word(m.pass_os)}  {m.os_note}  < {spec.os_max_pct:.1f}%")
     voltage = (
         f"Voltage: {_word(m.pass_v)}  "
         f"outside +{spec.v_pos:.1f}/-{spec.v_neg:.1f} V: {len(m.viol_t)}"
@@ -583,28 +594,45 @@ class StepCapture:
         self.saved = False
         self.capped = False
         # The first reference edge after connect is not recorded. After that,
-        # a capture starts only from a settled ref_a dwell into ref_b.
+        # a capture starts from any steady allowed start dwell into the opposite level.
         self.skipped_first = False
         self.ready = False
+        self.dwell_target: float | None = None
         self.dwell: deque = deque()
         self.hold_note = "skipping the first reference step"
 
+    def _allowed_starts(self) -> list[tuple[float, float]]:
+        low = self.spec.ref_a
+        high = self.spec.ref_b
+        if self.spec.step_dir == "pos":
+            return [(low, high)]
+        if self.spec.step_dir == "neg":
+            return [(high, low)]
+        return [(low, high), (high, low)]
+
+    def _wait_prompt(self) -> str:
+        low = self.spec.ref_a
+        high = self.spec.ref_b
+        if self.spec.step_dir == "pos":
+            return f"waiting for steady {low:+.3f} m -> {high:+.3f} m"
+        if self.spec.step_dir == "neg":
+            return f"waiting for steady {high:+.3f} m -> {low:+.3f} m"
+        return f"waiting for steady {low:+.3f} or {high:+.3f} m"
+
     def arm(self) -> None:
-        """Arm another ref_a -> ref_b capture without skipping an extra step."""
+        """Arm the next capture without skipping an extra step."""
         self.phase = "wait"
         self.step = None
         self.pre.clear()
         self.preview.clear()
         self.dwell.clear()
         self.ready = False
+        self.dwell_target = None
         self.skipped_first = True
         self.end_reason = None
         self.saved = False
         self.capped = False
-        self.hold_note = (
-            f"waiting for a steady {self.spec.ref_a:+.3f} m, "
-            f"then the step to {self.spec.ref_b:+.3f} m"
-        )
+        self.hold_note = self._wait_prompt()
 
     def freeze(self, reason: str) -> bool:
         if self.phase != "live" or self.step is None:
@@ -785,10 +813,9 @@ class StepCapture:
     def _near(self, ref: float, target: float) -> bool:
         return abs(ref - target) <= self.spec.ref_tol
 
-    def _low_is_steady(self) -> tuple[bool, str]:
-        """True once the recent dwell at ref_a is flat and the ball is there."""
+    def _target_is_steady(self, target: float) -> tuple[bool, str]:
+        """True once the recent dwell at target is flat and the ball is there."""
         spec = self.spec
-        target = spec.ref_a
         if len(self.dwell) < 10:
             return False, f"holding {target:+.3f} m, collecting samples"
         t1 = self.dwell[-1][0]
@@ -826,64 +853,67 @@ class StepCapture:
         theta_ref: float | None = None,
     ) -> str | None:
         changed = self.last_ref is not None and abs(ref - self.last_ref) >= self.spec.step_delta
-        low = self.spec.ref_a
-        high = self.spec.ref_b
+        allowed = self._allowed_starts()
 
         if changed and not self.skipped_first:
             self.skipped_first = True
             self.ready = False
+            self.dwell_target = None
             self.dwell.clear()
             self.pre.clear()
             self.last_ref = ref
-            self.hold_note = (
-                f"skipped the first step; waiting for a steady {low:+.3f} m "
-                f"before recording {low:+.3f} -> {high:+.3f} m"
-            )
+            self.hold_note = f"skipped the first step; {self._wait_prompt()}"
             return "skip"
 
-        if (
-            changed
-            and self.ready
-            and self._near(self.last_ref, low)
-            and self._near(ref, high)
-        ):
-            self._begin(t_ms, y, ref, voltage, theta, theta_ref)
-            self.last_ref = ref
-            self.ready = False
-            self.dwell.clear()
-            self.hold_note = "recording"
-            return "start"
+        if changed and self.ready and self.dwell_target is not None:
+            for start_t, end_t in allowed:
+                if self._near(self.last_ref, start_t) and self._near(ref, end_t):
+                    self._begin(t_ms, y, ref, voltage, theta, theta_ref)
+                    self.last_ref = ref
+                    self.ready = False
+                    self.dwell_target = None
+                    self.dwell.clear()
+                    self.hold_note = "recording"
+                    return "start"
 
         if changed:
             self.ready = False
+            self.dwell_target = None
             self.dwell.clear()
             self.pre.clear()
 
-        if self._near(ref, low):
+        matched = next(((s, e) for s, e in allowed if self._near(ref, s)), None)
+        if matched is not None:
+            start_t, end_t = matched
+            if self.dwell_target is not None and abs(self.dwell_target - start_t) > 1e-9:
+                self.dwell.clear()
+                self.pre.clear()
+                self.ready = False
+            self.dwell_target = start_t
             self.pre.append((t_ms, y, ref, voltage, theta, theta_ref))
             self._trim_pre(t_ms)
             self.dwell.append((t_ms, y))
             dwell_ms = max(500.0, 2.5 * self.spec.tail_s * 1000.0)
             while self.dwell and t_ms - self.dwell[0][0] > dwell_ms:
                 self.dwell.popleft()
-            steady, why = self._low_is_steady()
+            steady, why = self._target_is_steady(start_t)
             self.ready = self.skipped_first and steady
             if not self.skipped_first:
                 self.hold_note = "skipping the first reference step"
             elif self.ready:
-                self.hold_note = f"steady at {low:+.3f} m; recording starts on the step to {high:+.3f} m"
+                self.hold_note = f"steady at {start_t:+.3f} m; recording starts on step to {end_t:+.3f} m"
             else:
                 self.hold_note = why
         else:
             self.ready = False
+            self.dwell_target = None
             self.dwell.clear()
             self.pre.clear()
             if not self.skipped_first:
                 self.hold_note = "skipping the first reference step"
-            elif self._near(ref, high):
-                self.hold_note = f"at {high:+.3f} m; waiting for the return to {low:+.3f} m"
             else:
-                self.hold_note = f"y_ref {ref:+.3f} m; waiting for {low:+.3f} m"
+                want = allowed[0][0]
+                self.hold_note = f"y_ref {ref:+.3f} m; waiting for {want:+.3f} m"
 
         self.last_ref = ref
         return None
@@ -1183,7 +1213,7 @@ def _panel_rows(m: Metrics | None, phase: str, end_reason: str | None, current_r
     gap()
     if m.ts is not None:
         verdict_line(f"t_s {m.ts:.3f}s", m.pass_ts)
-        add(f"+/-{m.band_half:.4f} m", MUTED, 8)
+        add(f"[{m.r1 - m.band_half:.3f}, {m.r1 + m.band_half:.3f}] m", MUTED, 8)
     else:
         verdict_line("t_s", m.pass_ts)
         for line in textwrap.wrap(m.ts_note, width=36)[:2]:
@@ -1208,6 +1238,8 @@ def _panel_rows(m: Metrics | None, phase: str, end_reason: str | None, current_r
         add("[N] next step", MUTED, 8)
     else:
         add("[M] freeze", MUTED, 8)
+    if spec is not None:
+        add(f"[D] dir: {spec.step_dir}", MUTED, 8)
     add("[Space] release port", MUTED, 8)
     return rows, face
 
@@ -1326,17 +1358,20 @@ def draw_step(
     )
 
     y_vals = list(y) + [y0, step["r1"], step["r0"]]
+    t_end = max(t[-1], 0.0)
+    if m.band_half is not None:
+        lo = step["r1"] - m.band_half
+        hi = step["r1"] + m.band_half
+        ax_pos.fill_between(
+            [0.0, t_end], [lo, lo], [hi, hi],
+            color=SS_C, alpha=0.16, label=f"[{lo:.3f}, {hi:.3f}] m band", zorder=0,
+        )
+        ax_pos.plot([0.0, t_end], [lo, lo], color=SS_C, ls=":", lw=0.8, zorder=1)
+        ax_pos.plot([0.0, t_end], [hi, hi], color=SS_C, ls=":", lw=0.8, zorder=1)
+        y_vals.extend([lo, hi])
     if m.ss_confident and m.y_ss is not None:
-        t_end = max(t[-1], 0.0)
         ax_pos.plot([0.0, t_end], [m.y_ss, m.y_ss], color=SS_C, ls="--", lw=1.4, label=r"$y_{ss}$", zorder=2)
         y_vals.append(m.y_ss)
-        if m.band_half is not None and m.moved:
-            lo = m.y_ss - m.band_half
-            hi = m.y_ss + m.band_half
-            ax_pos.fill_between([0.0, t_end], [lo, lo], [hi, hi], color=SS_C, alpha=0.16, label=r"$\pm$2% band", zorder=0)
-            ax_pos.plot([0.0, t_end], [lo, lo], color=SS_C, ls=":", lw=0.8, zorder=1)
-            ax_pos.plot([0.0, t_end], [hi, hi], color=SS_C, ls=":", lw=0.8, zorder=1)
-            y_vals.extend([lo, hi])
         if m.ts is not None and m.ts_y is not None:
             ax_pos.axvline(m.ts, color=SETTLE_C, ls="--", lw=1.2, zorder=2)
             ax_pos.plot([m.ts], [m.ts_y], marker="s", ms=7, color=SETTLE_C, markeredgecolor="white", markeredgewidth=0.6, zorder=5)
@@ -1636,13 +1671,17 @@ def print_banner(port: str, baud: int, spec: Spec, log_path: str) -> None:
     print(f"Step analyzer  {port} @ {baud}")
     print(f"Full log: {log_path}")
     print("Line: theta_rad, theta_ref_rad, voltage_V, ball_pos_m, ball_ref_m   (leading millis optional)")
-    print(f"Skip the first step, then record {spec.ref_a:+.3f} -> {spec.ref_b:+.3f} m once the ball is steady.")
     print(
-        f"Checks: bounded, |e_ss|<={spec.ess_tol:.3f} m, "
-        f"t_s<={spec.ts_max:.3f}s, OS<={spec.os_max_pct:.0f}%, "
+        f"Skip the first step, then record {spec.ref_a:+.3f} <-> {spec.ref_b:+.3f} m "
+        f"(dir={spec.step_dir}) once steady."
+    )
+    print(
+        f"Checks: bounded, [{spec.ref_a - spec.ess_tol_a:.3f},{spec.ref_a + spec.ess_tol_a:.3f}] / "
+        f"[{spec.ref_b - spec.ess_tol_b:.3f},{spec.ref_b + spec.ess_tol_b:.3f}] m, "
+        f"t_s<={spec.ts_max:.3f}s, OS<{spec.os_max_pct:.0f}%, "
         f"V within +{spec.v_pos:.1f}/-{spec.v_neg:.1f}"
     )
-    print("Keys: M freeze   N next step   Space release port (DTR reset on connect)")
+    print("Keys: M freeze   N next step   D dir (both/pos/neg)   Space release port (DTR reset on connect)")
     print()
 
 
@@ -1704,11 +1743,11 @@ def run_plotter(port: str, baud: int, spec: Spec) -> None:
     def suptitle() -> str:
         conn = reader.status
         if capture.phase == "live":
-            return f"LIVE    {conn}    [M] freeze    [Space] release port"
+            return f"LIVE ({spec.step_dir})    {conn}    [M] freeze    [Space] release port"
         if capture.phase == "frozen":
             why = capture.end_reason or "frozen"
-            return f"FROZEN ({why})    [N] next step    [Space] release port"
-        return f"{capture.hold_note}    {conn}"
+            return f"FROZEN ({why})    [N] next step    [D] dir:{spec.step_dir}    [Space] release port"
+        return f"[{spec.step_dir}] {capture.hold_note}    {conn}"
 
     def update(_frame):
         try:
@@ -1785,6 +1824,17 @@ def run_plotter(port: str, baud: int, spec: Spec) -> None:
             state["sig"] = None
             state["note"] = capture.hold_note
             print("\n" + capture.hold_note)
+        elif event.key in ("d", "D"):
+            order = ("both", "pos", "neg")
+            spec.step_dir = order[(order.index(spec.step_dir) + 1) % len(order)]
+            print(f"\nStep direction: {spec.step_dir}")
+            if capture.phase == "wait":
+                capture.dwell.clear()
+                capture.pre.clear()
+                capture.ready = False
+                capture.dwell_target = None
+                capture.hold_note = capture._wait_prompt()
+                state["note"] = capture.hold_note
 
     def on_close(_event):
         if capture.phase == "live":
@@ -1813,8 +1863,14 @@ def main() -> None:
     parser.add_argument("--baud", type=int, default=230400, help="Baud rate (default: 230400)")
     parser.add_argument("--ref-a", type=float, default=LAB_REF_A_M, help="m, low step reference position")
     parser.add_argument("--ref-b", type=float, default=LAB_REF_B_M, help="m, high step reference position")
-    parser.add_argument("--ess-tol", type=float, default=LAB_ESS_TOL_M, help="m, |e_ss| at or below this counts as zero")
-    parser.add_argument("--ts-max", type=float, default=LAB_TS_MAX_S, help="seconds, 2%% settling-time limit")
+    parser.add_argument(
+        "--step-dir",
+        choices=("both", "pos", "neg"),
+        default="both",
+        help="which step direction to capture (default: both)",
+    )
+    parser.add_argument("--ess-tol", type=float, default=None, help="m, override steady-state band half-width for both targets")
+    parser.add_argument("--ts-max", type=float, default=LAB_TS_MAX_S, help="seconds, target-band settling-time limit")
     parser.add_argument("--os-max", type=float, default=LAB_OS_MAX_PCT, help="percent overshoot limit")
     parser.add_argument("--v-pos", type=float, default=None, help="positive voltage rail, volts")
     parser.add_argument("--v-neg", type=float, default=None, help="negative voltage rail magnitude, volts")
@@ -1832,7 +1888,9 @@ def main() -> None:
     spec = Spec(
         ref_a=args.ref_a,
         ref_b=args.ref_b,
-        ess_tol=args.ess_tol,
+        step_dir=args.step_dir,
+        ess_tol_a=args.ess_tol if args.ess_tol is not None else LAB_ESS_TOL_A_M,
+        ess_tol_b=args.ess_tol if args.ess_tol is not None else LAB_ESS_TOL_B_M,
         ts_max=args.ts_max,
         os_max_pct=args.os_max,
         v_pos=args.v_pos if args.v_pos is not None else (args.v_limit if args.v_limit is not None else LAB_V_POS_V),

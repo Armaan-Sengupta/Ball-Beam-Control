@@ -60,23 +60,27 @@ float controller(float targetAngle, float currentAngle) {
 }
 
 float outerController(float targetPosition, float currentPosition) {
-  // Use double (64-bit) so 15-digit Tustin coefficients do not suffer
-  static double last_error = 0.0;
-  static double last_theta_ref = 0.0;
+  static double e1 = 0.0, e2 = 0.0; // e[k-1], e[k-2]
+  // u outer controller is theta_ref
+  static double u1 = 0.0, u2 = 0.0; // u[k-1], u[k-2] (UNSATURATED)
 
-  const double b1_outer = -6.984987531172070;
-  const double b0_outer =  6.980099750623441;
-  const double a0_outer = -0.995012468827930;
 
-  double error = (double)targetPosition - (double)currentPosition; // meters
-  double theta_ref = (b1_outer * error) + (b0_outer * last_error) - (a0_outer * last_theta_ref);
+  const double a0 = -57.616743244585734;
+  const double a1 = 115.120159447645539;
+  const double a2 = -57.503510580170872;
+  const double b1 = -1.986886548778065;
+  const double b2 = 0.986886548778065;
 
-  // Store unsaturated output (lab manual cautions: "do not feed back saturated output")
-  last_error = error;
-  last_theta_ref = theta_ref;
+  double e = targetPosition - currentPosition;
+  double u = -b1 * u1 - b2 * u2 + a0 * e + a1 * e1 + a2 * e2;
+
+  e2 = e1;
+  e1 = e;
+  u2 = u1;
+  u1 = u; // store the linear controller output, not the saturated value
 
   // Gear angle saturator in a separate variable before passing to inner loop
-  double theta_ref_sat = theta_ref;
+  double theta_ref_sat = u;
   if (theta_ref_sat > 0.7) {
     theta_ref_sat = 0.7;
   } else if (theta_ref_sat < -0.7) {
