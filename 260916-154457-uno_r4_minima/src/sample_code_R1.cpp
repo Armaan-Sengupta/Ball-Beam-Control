@@ -65,11 +65,11 @@ float outerController(float targetPosition, float currentPosition) {
   static double u1 = 0.0, u2 = 0.0; // u[k-1], u[k-2] (UNSATURATED)
 
 
-  const double a0 = -57.616743244585734;
-  const double a1 = 115.120159447645539;
-  const double a2 = -57.503510580170872;
-  const double b1 = -1.986886548778065;
-  const double b2 = 0.986886548778065;
+  const double a0 = -89.180226732673248;
+  const double a1 = 178.217764356435623;
+  const double a2 = -89.037652475247526;
+  const double b1 = -1.980198019801980;
+  const double b2 = 0.980198019801980;
 
   double e = targetPosition - currentPosition;
   double u = -b1 * u1 - b2 * u2 + a0 * e + a1 * e1 + a2 * e2;
